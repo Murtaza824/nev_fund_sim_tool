@@ -1,111 +1,117 @@
-import os
-from flask import Flask, render_template, request, send_file
-app = Flask(__name__)
-
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    if request.method == 'POST':
-        form_inputs = request.form.to_dict()
-        return render_template('index.html', inputs=form_inputs)
-    return render_template('index.html', inputs={})
-    
+from flask import Flask, render_template, request
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import pandas as pd
 import io
 import base64
-import pandas as pd
-import tempfile
+import os
+
+app = Flask(__name__)
+
+# Exit valuation scenarios
+exit_values = [0, 50_000_000, 100_000_000, 350_000_000, 500_000_000,
+               1_000_000_000, 5_000_000_000, 10_000_000_000]
+
+# Scenario with no follow-on
+def simulate_scenario(fund_size, num_checks, check_size, valuation, exit_probs):
+    ownership = check_size / valuation
+    outcomes = np.random.choice(exit_values, size=10000 * num_checks, p=exit_probs)
+    dpi_matrix = (ownership * outcomes) / check_size
+    dpi_matrix = dpi_matrix.reshape(-1, num_checks)
+    dpi_totals = dpi_matrix.sum(axis=1)
+    return dpi_totals
+
+# Scenario with follow-on
+def simulate_with_follow_on(fund_size, num_initial, initial_check, init_valuation,
+                             num_follow, follow_check, follow_valuation, exit_probs):
+    initial_ownership = initial_check / init_valuation
+    follow_ownership = follow_check / follow_valuation
+
+    total_investments = num_initial + num_follow
+    outcomes = np.random.choice(exit_values, size=10000 * total_investments, p=exit_probs)
+    dpi_matrix = outcomes.reshape(-1, total_investments)
+
+    init_returns = dpi_matrix[:, :num_initial] * initial_ownership / initial_check
+    follow_returns = dpi_matrix[:, num_initial:] * follow_ownership / follow_check
+    dpi_totals = init_returns.sum(axis=1) + follow_returns.sum(axis=1)
+    return dpi_totals
+
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    if request.method == 'POST':
+        form = request.form
+        inputs = form.to_dict()
+
+        # Exit probability assumptions
+        probs = [float(form.get(f'exit_{i}', 0)) / 100 for i in range(8)]
+        total_prob = sum(probs)
+        if total_prob == 0:
+            probs = [1 / 8] * 8  # fallback
+        else:
+            probs = [p / total_prob for p in probs]  # normalize to 100%
+
+        # Scenario 1 Inputs
+        s1_fund = float(form.get('s1_fund_size', 0))
+        s1_checks = int(form.get('s1_num_checks', 0))
+        s1_check_size = float(form.get('s1_check_size', 0))
+        s1_valuation = float(form.get('s1_valuation', 1))
+        s1_follow_on = 's1_follow_toggle' in form
+
+        # Scenario 2 Inputs
+        s2_fund = float(form.get('s2_fund_size', 0))
+        s2_checks = int(form.get('s2_num_checks', 0))
+        s2_check_size = float(form.get('s2_check_size', 0))
+        s2_valuation = float(form.get('s2_valuation', 1))
+        s2_follow_on = 's2_follow_toggle' in form
+
+        # Run Scenario 1 Simulation
+        if s1_follow_on:
+            s1_follow_num = int(form.get('s1_follow_num', 0))
+            s1_follow_size = float(form.get('s1_follow_size', 0))
+            s1_follow_valuation = float(form.get('s1_follow_valuation', 1))
+            dpi1 = simulate_with_follow_on(s1_fund, s1_checks, s1_check_size, s1_valuation,
+                                           s1_follow_num, s1_follow_size, s1_follow_valuation, probs)
+        else:
+            dpi1 = simulate_scenario(s1_fund, s1_checks, s1_check_size, s1_valuation, probs)
+
+        # Run Scenario 2 Simulation
+        if s2_follow_on:
+            s2_follow_num = int(form.get('s2_follow_num', 0))
+            s2_follow_size = float(form.get('s2_follow_size', 0))
+            s2_follow_valuation = float(form.get('s2_follow_valuation', 1))
+            dpi2 = simulate_with_follow_on(s2_fund, s2_checks, s2_check_size, s2_valuation,
+                                           s2_follow_num, s2_follow_size, s2_follow_valuation, probs)
+        else:
+            dpi2 = simulate_scenario(s2_fund, s2_checks, s2_check_size, s2_valuation, probs)
+
+        # DPI Histogram
+        fig, ax = plt.subplots(figsize=(12, 5))
+        ax.hist(dpi1, bins=50, alpha=0.6, label='Scenario 1')
+        ax.hist(dpi2, bins=50, alpha=0.6, label='Scenario 2')
+        ax.set_title('DPI Distribution Comparison')
+        ax.set_xlabel('DPI')
+        ax.set_ylabel('Count')
+        ax.legend()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        plt.close(fig)
+        buf.seek(0)
+        dpi_plot = base64.b64encode(buf.read()).decode('utf-8')
+
+        # Summary Stats
+        df = pd.DataFrame({'Scenario 1': dpi1, 'Scenario 2': dpi2})
+        stats_table = df.describe().to_html(classes='table table-bordered')
+
+        return render_template('index.html',
+                               inputs=inputs,
+                               dpi_plot_url=f'data:image/png;base64,{dpi_plot}',
+                               stats_table=stats_table)
+
+    return render_template('index.html', inputs={})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(debug=False, host='0.0.0.0', port=port)
-
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    plot_url = None
-    summary_stats = None
-    csv_data = None
-    saved_inputs = request.form if request.method == 'POST' else {}
-
-    if request.method == 'POST':
-        def parse_scenario(prefix):
-            return {
-                'fund_size': float(request.form.get(f'{prefix}_fund_size', 0)),
-                'num_checks': int(request.form.get(f'{prefix}_num_checks', 0)),
-                'initial_check_size': float(request.form.get(f'{prefix}_initial_check_size', 0)),
-                'initial_valuation': float(request.form.get(f'{prefix}_initial_valuation', 1)),
-                'follow_on': request.form.get(f'{prefix}_follow_on') == 'on',
-                'num_follow_ons': int(request.form.get(f'{prefix}_num_follow_ons') or 0),
-                'follow_on_check_size': float(request.form.get(f'{prefix}_follow_on_check_size') or 0),
-                'follow_on_valuation': float(request.form.get(f'{prefix}_follow_on_valuation') or 1),
-            }
-
-        s1 = parse_scenario('s1')
-        s2 = parse_scenario('s2')
-
-        exit_vals = [0, 50e6, 100e6, 350e6, 500e6, 1e9, 5e9, 10e9]
-        probs = [float(request.form.get(f'prob_{int(v/1e6)}', 0)) / 100 for v in exit_vals]
-        probs = np.array(probs) / sum(probs) if sum(probs) > 0 else np.ones(len(exit_vals)) / len(exit_vals)
-
-        dilution = 0.80
-        followon_dilution = 0.40
-        num_simulations = 10000
-
-        def simulate(s):
-            ownership = (s['initial_check_size'] / s['initial_valuation']) * dilution
-            follow_ownership = (s['follow_on_check_size'] / s['follow_on_valuation']) * followon_dilution if s['follow_on'] else 0
-            returns = []
-            for _ in range(num_simulations):
-                initial = sum(np.random.choice(exit_vals, s['num_checks'], p=probs)) * ownership
-                follow = sum(np.random.choice(exit_vals, s['num_follow_ons'], p=probs)) * follow_ownership if s['follow_on'] else 0
-                returns.append(initial + follow)
-            return np.array(returns) / (s['fund_size'] * 0.78)  # DPI = Return / Invested Capital
-
-        dpi1 = simulate(s1)
-        dpi2 = simulate(s2)
-
-        # Create histogram
-        fig, ax = plt.subplots(figsize=(20,7), dpi=150)
-        ax.hist(dpi1, bins=100, alpha=0.6, label='Scenario 1')
-        ax.hist(dpi2, bins=100, alpha=0.6, label='Scenario 2')
-        ax.set_xlabel('DPI')
-        ax.set_ylabel('Count')
-        ax.set_title('DPI Distribution Comparison')
-        ax.legend()
-        ax.grid(True)
-
-        img = io.BytesIO()
-        plt.tight_layout()
-        plt.savefig(img, format='png')
-        img.seek(0)
-        plot_url = base64.b64encode(img.getvalue()).decode()
-        plt.close()
-
-        # Save to temp CSV
-        csv_df = pd.DataFrame({"Scenario 1": dpi1, "Scenario 2": dpi2})
-        summary_stats = csv_df.describe().round(2).to_html(classes='summary-table')
-        temp_csv = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
-        csv_df.to_csv(temp_csv.name, index=False)
-        csv_data = os.path.basename(temp_csv.name)
-
-        # Save chart image
-        img_path = os.path.join(tempfile.gettempdir(), "dpi_chart.png")
-        with open(img_path, 'wb') as f:
-            f.write(base64.b64decode(plot_url))
-
-    return render_template('index.html', plot_url=plot_url, stats_table=summary_stats, csv_data=csv_data, inputs=saved_inputs)
-
-@app.route('/download/<filename>')
-def download_csv(filename):
-    path = os.path.join(tempfile.gettempdir(), filename)
-    return send_file(path, as_attachment=True)
-
-@app.route('/chart')
-def chart_popup():
-    path = os.path.join(tempfile.gettempdir(), "dpi_chart.png")
-    return send_file(path, mimetype='image/png')
-
-if __name__ == '__main__':
-    app.run(debug=True)
