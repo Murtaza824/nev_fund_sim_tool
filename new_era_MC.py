@@ -1,4 +1,6 @@
+import os
 from flask import Flask, render_template, request, send_file
+app = Flask(__name__)
 import numpy as np
 import matplotlib
 matplotlib.use('Agg')
@@ -7,7 +9,6 @@ import io
 import base64
 import pandas as pd
 import tempfile
-import os
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
