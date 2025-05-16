@@ -2,8 +2,11 @@ import os
 from flask import Flask, render_template, request, send_file
 app = Flask(__name__)
 
-@app.route('/', methods=['GET'])
+@app.route('/', methods=['GET', 'POST'])
 def index():
+    if request.method == 'POST':
+        form_inputs = request.form.to_dict()
+        return render_template('index.html', inputs=form_inputs)
     return render_template('index.html', inputs={})
     
 import numpy as np
