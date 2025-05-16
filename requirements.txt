@@ -1,3 +1,3 @@
-flask==2.x.x
-matplotlib==3.x.x
-pandas==1.x.x
+flask==2.3.2
+matplotlib==3.7.1
+pandas==1.5.3
